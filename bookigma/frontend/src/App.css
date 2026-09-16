@@ -1,0 +1,73 @@
+:root {
+  --bg-primary: #f0fdf4;
+  --bg-card: #ffffff;
+  --text-primary: #15803d;
+  --text-main: #1f2937;
+  --text-sub: #4b5563;
+  --accent-green: #22c55e;
+  --accent-hover: #16a34a;
+  --border-color: #e5e7eb;
+}
+
+[data-theme='dark'] {
+  --bg-primary: #0f172a;
+  --bg-card: #1e293b;
+  --text-primary: #4ade80;
+  --text-main: #f8fafc;
+  --text-sub: #94a3b8;
+  --accent-green: #22c55e;
+  --accent-hover: #16a34a;
+  --border-color: #334155;
+}
+
+body {
+  margin: 0;
+  font-family: 'Segoe UI', Roboto, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-main);
+  transition: background-color 0.3s, color 0.3s;
+}
+
+.app-container {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.main-layout {
+  display: flex;
+  max-width: 1300px;
+  margin: 70px auto 0 auto;
+  padding: 20px;
+  gap: 20px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.content-area {
+  flex: 1;
+  min-width: 0;
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+}
+
+.btn-primary {
+  background-color: var(--accent-green);
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.2s;
+}
+
+.btn-primary:hover {
+  background-color: var(--accent-hover);
+}
