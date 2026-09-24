@@ -1,163 +1,397 @@
-import { useState, useEffect } from 'react';
-import { Bookmark, Type, Volume2, Music, Timer, Languages, Sparkles, Play, Pause, RotateCcw } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import {
+  Bookmark, ChevronLeft, ChevronRight, Languages, List, Minus, Music, Pause,
+  Play, Plus, RotateCcw, Sparkles, Timer, Type, Volume2,
+} from 'lucide-react';
+import { useApp, useAuth, useToast } from '../hooks/useStore';
+import { duration } from '../lib/format';
+import { POINT_RULES } from '../lib/gamification';
+import { ProgressBar } from '../components/common/ui';
 
+/**
+ * Trình đọc sách có lưu tiến trình.
+ *
+ * Vị trí đọc được xác định bằng cặp (chương, đoạn văn đang hiển thị trên màn hình).
+ * Một observer theo dõi đoạn nào đang nằm trong khung nhìn, từ đó tính phần trăm
+ * hoàn thành trên toàn bộ cuốn sách và ghi xuống kho dữ liệu sau mỗi 1,5 giây
+ * để không ghi quá dày.
+ */
 export default function ReaderPage() {
-  // State quản lý font size & dịch ngôn ngữ
+  const { bookId } = useParams();
+  const navigate = useNavigate();
+  const toast = useToast();
+  const { user } = useAuth();
+  const { bookById, getProgress, saveProgress, earnPoints, trackDaily, growPet, touchStreak } = useApp();
+
+  const book = bookById(bookId);
+  const saved = getProgress(user.id)[bookId];
+
+  const [chapterIndex, setChapterIndex] = useState(saved?.chapterIndex ?? 0);
   const [fontSize, setFontSize] = useState(18);
-  const [language, setLanguage] = useState('vi'); // 'vi' | 'en'
+  const [language, setLanguage] = useState('vi');
+  const [showToc, setShowToc] = useState(false);
+  const [showAi, setShowAi] = useState(true);
+  const [bookmarks, setBookmarks] = useState([]);
+  const [speaking, setSpeaking] = useState(false);
 
-  // State nhạc nền
-  const [isPlayingMusic, setIsPlayingMusic] = useState(false);
+  // Nhạc nền + Pomodoro
+  const [music, setMusic] = useState(false);
+  const [seconds, setSeconds] = useState(1500);
+  const [timerOn, setTimerOn] = useState(false);
 
-  // State đồng hồ Pomodoro
-  const [seconds, setSeconds] = useState(1500); // 25 phút
-  const [isTimerRunning, setIsTimerRunning] = useState(false);
+  // Tiến trình
+  const [percent, setPercent] = useState(saved?.percent ?? 0);
+  const [sessionSeconds, setSessionSeconds] = useState(0);
+  const paraRefs = useRef([]);
+  const currentPara = useRef(saved?.paragraphIndex ?? 0);
+  const contentRef = useRef(null);
 
-  // Đếm ngược thời gian (Đã sửa lỗi setState)
-  useEffect(() => {
-    let interval = null;
-    if (isTimerRunning) {
-      interval = setInterval(() => {
-        setSeconds((prevSeconds) => {
-          if (prevSeconds <= 1) {
-            setIsTimerRunning(false);
-            return 0;
-          }
-          return prevSeconds - 1;
-        });
-      }, 1000);
-    }
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [isTimerRunning]);
+  const chapters = useMemo(() => book?.chapters || [], [book]);
+  const chapter = chapters[chapterIndex];
 
-  const formatTime = (secs) => {
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
-    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-  };
+  const totalParagraphs = useMemo(
+    () => chapters.reduce((s, c) => s + c.paragraphs.length, 0),
+    [chapters]
+  );
 
-  // Nội dung đa ngôn ngữ
-  const content = {
-    vi: {
-      title: "Chương 1: Tiếng Gọi Từ Vũ Trụ (Nhà Giả Kim)",
-      p1: "Cậu tên là Santiago. Trời đã chập tối khi cậu cùng đàn cừu đến một nhà thờ cổ sụp đổ, mái đã sập từ lâu và một cây chăn lớn đã mọc lên ngay nơi xưa là phòng thánh.",
-      p2: "Cậu quyết định ngủ lại đấy qua đêm. Cậu lùa đống cừu qua cánh cổng hỏng rồi chắn ngang bằng vài thanh gỗ để chúng khỏi đi lang thang lúc đêm tối. Tuy vùng này không có dã thú nhưng đã có lần một con cừu xổng ra khiến cậu phải mất cả ngày hôm sau đi tìm...",
-      aiExplanation: "Đoạn văn tượng trưng cho sự bắt đầu của một hành trình tâm linh. Nhà thờ hoang và cây chăn mọc từ phòng thánh gợi mở sự dung hòa giữa tôn giáo truyền thống và bản chất tự nhiên của vũ trụ."
+  const paragraphsBefore = useMemo(
+    () => chapters.slice(0, chapterIndex).reduce((s, c) => s + c.paragraphs.length, 0),
+    [chapters, chapterIndex]
+  );
+
+  /** Tính % dựa trên đoạn văn xa nhất người đọc đã tới. */
+  const computePercent = useCallback(
+    (paraIdx) => {
+      if (!totalParagraphs) return 0;
+      const global = paragraphsBefore + paraIdx + 1;
+      return Math.min(100, Math.round((global / totalParagraphs) * 100));
     },
-    en: {
-      title: "Chapter 1: The Call of the Universe (The Alchemist)",
-      p1: "The boy's name was Santiago. Dusk was falling as he arrived with his herd at an abandoned church. The roof had fallen in long ago, and a huge sycamore had grown on the spot where the sacristy had once stood.",
-      p2: "He decided to spend the night there. He drove all his sheep through the ruined gate and then laid a few planks across it to prevent the flock from wandering away during the night...",
-      aiExplanation: "This passage symbolizes the beginning of a spiritual journey. The abandoned church and the sycamore tree growing from the sacristy suggest a harmony between traditional religion and nature."
+    [paragraphsBefore, totalParagraphs]
+  );
+
+  // Theo dõi đoạn văn đang hiển thị để biết người dùng đọc tới đâu.
+  useEffect(() => {
+    if (!chapter) return undefined;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          const idx = Number(entry.target.dataset.index);
+          if (idx > currentPara.current || idx === 0) currentPara.current = idx;
+          setPercent((prev) => Math.max(prev, computePercent(currentPara.current)));
+        });
+      },
+      { rootMargin: '-45% 0px -45% 0px' }
+    );
+    paraRefs.current.filter(Boolean).forEach((el) => observer.observe(el));
+    return () => observer.disconnect();
+  }, [chapter, chapterIndex, computePercent]);
+
+  // Ghi tiến trình định kỳ (gom lại để tránh ghi liên tục vào localStorage).
+  useEffect(() => {
+    if (!book) return undefined;
+    const id = setInterval(() => {
+      saveProgress(user.id, book.id, {
+        chapterIndex,
+        paragraphIndex: currentPara.current,
+        percent,
+        secondsRead: (saved?.secondsRead || 0) + sessionSeconds,
+      });
+    }, 1500);
+    return () => clearInterval(id);
+  }, [book, user.id, chapterIndex, percent, sessionSeconds, saved?.secondsRead, saveProgress]);
+
+  // Đếm thời gian đọc thực tế của phiên này.
+  useEffect(() => {
+    const id = setInterval(() => setSessionSeconds((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Cứ mỗi phút đọc trọn vẹn thì cộng điểm Gigma, nuôi thú ảo và ghi nhận
+  // tiến độ nhiệm vụ "đọc 10 phút". Đây là lý do thú ảo lớn lên theo thói quen thật.
+  useEffect(() => {
+    if (sessionSeconds === 0 || sessionSeconds % 60 !== 0) return;
+    earnPoints(user.id, POINT_RULES.readMinute);
+    growPet(user.id, 1);
+    trackDaily(user.id, 'readMinutes', 1);
+    touchStreak(user.id);
+  }, [sessionSeconds, user.id, earnPoints, growPet, trackDaily, touchStreak]);
+
+  // Pomodoro
+  useEffect(() => {
+    if (!timerOn) return undefined;
+    const id = setInterval(() => {
+      setSeconds((s) => {
+        if (s <= 1) { setTimerOn(false); return 0; }
+        return s - 1;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, [timerOn]);
+
+  // Khôi phục đúng đoạn đang đọc dở khi mở lại sách.
+  useEffect(() => {
+    if (!saved || !chapter) return;
+    const el = paraRefs.current[saved.paragraphIndex];
+    if (el && saved.chapterIndex === chapterIndex) {
+      el.scrollIntoView({ block: 'center' });
     }
+    // Chỉ chạy một lần khi vào trang.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Dừng đọc thành tiếng khi rời trang.
+  useEffect(() => () => window.speechSynthesis?.cancel(), []);
+
+  if (!book) {
+    return (
+      <div className="main-layout">
+        <div className="card empty">
+          <h3>Không tìm thấy sách</h3>
+          <Link to="/library" className="btn btn-primary btn-sm">Về tủ sách</Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (!chapters.length) {
+    return (
+      <div className="main-layout">
+        <div className="card empty">
+          <h3>Cuốn sách này chưa có bản đọc trực tuyến</h3>
+          <p className="small">Bạn có thể đặt mua bản in tại cửa hàng.</p>
+          <Link to={`/book/${book.id}`} className="btn btn-primary btn-sm">Xem sản phẩm</Link>
+        </div>
+      </div>
+    );
+  }
+
+  const goChapter = (idx) => {
+    if (idx < 0 || idx >= chapters.length) return;
+    setChapterIndex(idx);
+    currentPara.current = 0;
+    setShowToc(false);
+    contentRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // Sang chương mới thì % tối thiểu là toàn bộ các chương trước đó.
+    const before = chapters.slice(0, idx).reduce((s, c) => s + c.paragraphs.length, 0);
+    setPercent((p) => Math.max(p, Math.round((before / totalParagraphs) * 100)));
   };
 
-  const currentContent = content[language];
+  const toggleSpeak = () => {
+    if (!window.speechSynthesis) return toast('Trình duyệt không hỗ trợ đọc thành tiếng.', 'error');
+    if (speaking) {
+      window.speechSynthesis.cancel();
+      setSpeaking(false);
+      return;
+    }
+    const utter = new SpeechSynthesisUtterance(chapter.paragraphs.join(' '));
+    utter.lang = language === 'vi' ? 'vi-VN' : 'en-US';
+    utter.onend = () => setSpeaking(false);
+    window.speechSynthesis.speak(utter);
+    setSpeaking(true);
+    toast('Đang đọc thành tiếng chương hiện tại.');
+  };
+
+  const addBookmark = () => {
+    const mark = { chapterIndex, paragraphIndex: currentPara.current, at: Date.now() };
+    setBookmarks((b) => [...b, mark]);
+    toast(`Đã đánh dấu tại ${chapter.title}.`);
+  };
+
+  const formatClock = (s) =>
+    `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`;
+
+  const aiInsight = buildInsight(book, chapter, language);
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '20px', maxWidth: '1100px', margin: '0 auto', alignItems: 'start' }}>
-      
-      {/* ================= CỘT TRÁI (2/3): NỘI DUNG ĐỌC SÁCH ================= */}
-      <div className="card">
-        {/* Header điều khiển văn bản */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: '15px', borderBottom: '1px solid var(--border-color)', marginBottom: '20px', flexWrap: 'wrap', gap: '10px' }}>
-          <h2 style={{ margin: 0, fontSize: '20px', color: 'var(--text-main)' }}>{currentContent.title}</h2>
-          
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <button 
-              onClick={() => setFontSize(fontSize === 22 ? 16 : fontSize + 2)}
-              style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-main)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '13px' }}
-            >
-              <Type size={15} /> Cỡ chữ ({fontSize}px)
-            </button>
-
-            <button style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-main)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '13px' }}>
-              <Volume2 size={15} /> Đọc thành tiếng
-            </button>
-
-            <button style={{ padding: '6px 10px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-main)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '13px' }}>
-              <Bookmark size={15} /> Đánh dấu
+    <div className="main-layout" style={{ maxWidth: 1180 }}>
+      {/* Thanh tiến trình cố định */}
+      <div style={{ position: 'sticky', top: 'var(--nav-h)', zIndex: 800, background: 'var(--bg-primary)', paddingBottom: 10 }}>
+        <div className="card row-between" style={{ padding: '10px 14px', flexWrap: 'wrap', gap: 10 }}>
+          <button className="btn btn-ghost btn-sm" onClick={() => navigate(`/book/${book.id}`)}>
+            <ChevronLeft size={15} /> {book.title}
+          </button>
+          <div className="row" style={{ flex: '1 1 220px', gap: 10, minWidth: 180 }}>
+            <ProgressBar percent={percent} />
+            <span className="tiny strong" style={{ color: 'var(--accent-green)', whiteSpace: 'nowrap' }}>{percent}%</span>
+          </div>
+          <div className="row tiny muted" style={{ gap: 12 }}>
+            <span>Phiên này: {duration(sessionSeconds)}</span>
+            <button className="btn btn-soft btn-sm" onClick={() => setShowToc((v) => !v)}>
+              <List size={14} /> Mục lục
             </button>
           </div>
         </div>
 
-        {/* Nội dung sách */}
-        <div style={{ lineHeight: '1.8', fontSize: `${fontSize}px`, textAlign: 'justify', color: 'var(--text-main)' }}>
-          <p style={{ marginBottom: '16px' }}>{currentContent.p1}</p>
-          <p style={{ marginBottom: '16px' }}>{currentContent.p2}</p>
-        </div>
+        {showToc && (
+          <div className="card" style={{ marginTop: 8, padding: 8 }}>
+            {chapters.map((c, i) => (
+              <button
+                key={i}
+                className={`list-item small ${i === chapterIndex ? 'active' : ''}`}
+                onClick={() => goChapter(i)}
+                style={{ color: i === chapterIndex ? 'var(--accent-green)' : undefined, fontWeight: i === chapterIndex ? 700 : 400 }}
+              >
+                {c.title}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* ================= CỘT PHẢI (1/3): CÔNG CỤ HỖ TRỢ & AI ================= */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
-        
-        {/* Box 1: Bấm giờ Pomodoro & Nhạc nền */}
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
-          <h4 style={{ margin: 0, color: 'var(--text-main)', borderBottom: '1px solid var(--border-color)', paddingBottom: '8px' }}>Góc tập trung</h4>
-          
-          {/* Nhạc nền */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Music size={18} color="var(--accent-green)" />
-              <span style={{ fontSize: '14px', fontWeight: 'bold' }}>Nhạc tập trung</span>
-            </div>
-            <button 
-              onClick={() => setIsPlayingMusic(!isPlayingMusic)}
-              style={{ padding: '5px 10px', borderRadius: '15px', border: '1px solid var(--border-color)', background: isPlayingMusic ? 'var(--accent-green)' : 'var(--bg-primary)', color: isPlayingMusic ? '#fff' : 'var(--text-main)', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}
-            >
-              {isPlayingMusic ? <Pause size={12} /> : <Play size={12} />}
-              {isPlayingMusic ? 'Đang bật' : 'Bật nhạc'}
-            </button>
-          </div>
-
-          {/* Pomodoro */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: 'var(--bg-primary)', padding: '10px', borderRadius: '8px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Timer size={18} color="var(--accent-green)" />
-              <span style={{ fontSize: '16px', fontWeight: 'bold', fontFamily: 'monospace' }}>{formatTime(seconds)}</span>
-            </div>
-            <div style={{ display: 'flex', gap: '6px' }}>
-              <button onClick={() => setIsTimerRunning(!isTimerRunning)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-main)' }}>
-                {isTimerRunning ? <Pause size={16} /> : <Play size={16} />}
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,300px)', gap: 20, alignItems: 'start' }}>
+        {/* Nội dung */}
+        <div className="card" ref={contentRef}>
+          <div className="row-between" style={{ paddingBottom: 14, borderBottom: '1px solid var(--border-color)', marginBottom: 20, flexWrap: 'wrap', gap: 10 }}>
+            <h2 style={{ margin: 0, fontSize: 19 }}>{chapter.title}</h2>
+            <div className="row" style={{ gap: 6 }}>
+              <div className="row" style={{ gap: 0, border: '1px solid var(--border-color)', borderRadius: 8 }}>
+                <button className="btn-icon" style={{ padding: 6 }} onClick={() => setFontSize((f) => Math.max(14, f - 2))} aria-label="Giảm cỡ chữ"><Minus size={14} /></button>
+                <span className="tiny row" style={{ gap: 3, padding: '0 6px' }}><Type size={13} /> {fontSize}</span>
+                <button className="btn-icon" style={{ padding: 6 }} onClick={() => setFontSize((f) => Math.min(26, f + 2))} aria-label="Tăng cỡ chữ"><Plus size={14} /></button>
+              </div>
+              <button className={`btn btn-sm ${speaking ? 'btn-primary' : 'btn-soft'}`} onClick={toggleSpeak}>
+                <Volume2 size={14} /> {speaking ? 'Dừng đọc' : 'Đọc to'}
               </button>
-              <button onClick={() => { setIsTimerRunning(false); setSeconds(1500); }} style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'var(--text-sub)' }}>
-                <RotateCcw size={16} />
+              <button className="btn btn-soft btn-sm" onClick={addBookmark}>
+                <Bookmark size={14} /> Đánh dấu
               </button>
             </div>
           </div>
 
-          {/* Ngôn ngữ */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Languages size={18} color="var(--accent-green)" />
-              <span style={{ fontSize: '14px', fontWeight: 'bold' }}>Ngôn ngữ</span>
-            </div>
-            <select 
-              value={language} 
-              onChange={(e) => setLanguage(e.target.value)}
-              style={{ padding: '4px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-main)', cursor: 'pointer', fontSize: '13px' }}
+          <div style={{ fontSize, lineHeight: 1.85, textAlign: 'justify' }}>
+            {chapter.paragraphs.map((p, i) => (
+              <p
+                key={i}
+                data-index={i}
+                ref={(el) => { paraRefs.current[i] = el; }}
+                style={{ marginBottom: 18 }}
+              >
+                {p}
+              </p>
+            ))}
+          </div>
+
+          <div className="row-between" style={{ marginTop: 26, paddingTop: 18, borderTop: '1px solid var(--border-color)' }}>
+            <button className="btn btn-ghost" onClick={() => goChapter(chapterIndex - 1)} disabled={chapterIndex === 0}>
+              <ChevronLeft size={16} /> Chương trước
+            </button>
+            <span className="tiny muted">{chapterIndex + 1} / {chapters.length}</span>
+            <button
+              className="btn btn-primary"
+              onClick={() => {
+                if (chapterIndex === chapters.length - 1) {
+                  setPercent(100);
+                  saveProgress(user.id, book.id, { chapterIndex, paragraphIndex: currentPara.current, percent: 100, secondsRead: (saved?.secondsRead || 0) + sessionSeconds });
+                  // Đọc hết chương cuối cũng là đọc xong một chương, nên vẫn tính
+                  // vào nhiệm vụ hằng ngày chứ không chỉ tính khi bấm "Chương sau".
+                  trackDaily(user.id, 'chapters', 1);
+                  if (!saved?.finished) {
+                    earnPoints(user.id, POINT_RULES.finishBook);
+                    toast(`Chúc mừng! Đọc xong cuốn này — nhận ${POINT_RULES.finishBook} điểm Gigma 🎉`);
+                  } else {
+                    toast('Bạn đã đọc lại xong cuốn sách này 🎉');
+                  }
+                  return;
+                }
+                earnPoints(user.id, POINT_RULES.finishChapter);
+                trackDaily(user.id, 'chapters', 1);
+                toast(`Xong một chương — nhận ${POINT_RULES.finishChapter} điểm Gigma`);
+                goChapter(chapterIndex + 1);
+              }}
             >
-              <option value="vi">Tiếng Việt</option>
-              <option value="en">English</option>
-            </select>
+              {chapterIndex === chapters.length - 1 ? 'Hoàn thành sách' : 'Chương sau'} <ChevronRight size={16} />
+            </button>
           </div>
         </div>
 
-        {/* Box 2: Phân tích ý nghĩa bằng AI */}
-        <div className="card" style={{ borderLeft: '4px solid var(--accent-green)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' }}>
-            <Sparkles size={18} color="var(--accent-green)" />
-            <h4 style={{ margin: 0, color: 'var(--accent-green)' }}>AI Giải thích ý nghĩa</h4>
-          </div>
-          <p style={{ margin: 0, fontSize: '14px', lineHeight: '1.6', color: 'var(--text-main)' }}>
-            {currentContent.aiExplanation}
-          </p>
-        </div>
+        {/* Công cụ hỗ trợ */}
+        <aside className="stack" style={{ position: 'sticky', top: 130 }}>
+          <div className="card stack">
+            <h4 style={{ margin: 0, fontSize: 15, paddingBottom: 8, borderBottom: '1px solid var(--border-color)' }}>Góc tập trung</h4>
 
+            <div className="row-between">
+              <span className="row small strong"><Music size={17} color="var(--accent-green)" /> Nhạc nền</span>
+              <button className={`btn btn-sm ${music ? 'btn-primary' : 'btn-soft'}`} onClick={() => setMusic((v) => !v)}>
+                {music ? <Pause size={13} /> : <Play size={13} />} {music ? 'Đang bật' : 'Bật'}
+              </button>
+            </div>
+
+            <div className="row-between" style={{ background: 'var(--bg-soft)', padding: 10, borderRadius: 9 }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Timer size={17} color="var(--accent-green)" />
+                <b style={{ fontFamily: 'monospace', fontSize: 17 }}>{formatClock(seconds)}</b>
+              </span>
+              <div className="row" style={{ gap: 4 }}>
+                <button className="btn-icon" style={{ padding: 5 }} onClick={() => setTimerOn((v) => !v)} aria-label="Bắt đầu/tạm dừng">
+                  {timerOn ? <Pause size={15} /> : <Play size={15} />}
+                </button>
+                <button className="btn-icon" style={{ padding: 5 }} onClick={() => { setTimerOn(false); setSeconds(1500); }} aria-label="Đặt lại">
+                  <RotateCcw size={15} />
+                </button>
+              </div>
+            </div>
+
+            <div className="row-between">
+              <span className="row small strong"><Languages size={17} color="var(--accent-green)" /> Ngôn ngữ</span>
+              <select className="select" style={{ width: 'auto', padding: '5px 8px', fontSize: 13 }} value={language} onChange={(e) => setLanguage(e.target.value)}>
+                <option value="vi">Tiếng Việt</option>
+                <option value="en">English</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="card" style={{ borderLeft: '4px solid var(--accent-green)' }}>
+            <div className="row-between" style={{ marginBottom: 8 }}>
+              <span className="row" style={{ gap: 6 }}>
+                <Sparkles size={17} color="var(--accent-green)" />
+                <h4 style={{ margin: 0, fontSize: 15, color: 'var(--accent-green)' }}>AI giải thích</h4>
+              </span>
+              <button className="btn-icon" style={{ padding: 4 }} onClick={() => setShowAi((v) => !v)}>
+                {showAi ? <Minus size={15} /> : <Plus size={15} />}
+              </button>
+            </div>
+            {showAi && <p className="small" style={{ margin: 0, lineHeight: 1.65 }}>{aiInsight}</p>}
+          </div>
+
+          {bookmarks.length > 0 && (
+            <div className="card">
+              <h4 style={{ margin: '0 0 10px', fontSize: 15 }}>Đánh dấu của bạn ({bookmarks.length})</h4>
+              <div className="stack" style={{ gap: 6 }}>
+                {bookmarks.map((b, i) => (
+                  <button key={i} className="list-item small" onClick={() => goChapter(b.chapterIndex)}>
+                    <Bookmark size={14} color="var(--accent-green)" />
+                    <span className="truncate">{chapters[b.chapterIndex]?.title}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="card">
+            <h4 style={{ margin: '0 0 10px', fontSize: 15 }}>Thống kê cuốn này</h4>
+            <div className="stack small" style={{ gap: 8 }}>
+              <div className="row-between"><span className="muted">Đã hoàn thành</span><b style={{ color: 'var(--accent-green)' }}>{percent}%</b></div>
+              <div className="row-between"><span className="muted">Tổng thời gian đọc</span><b>{duration((saved?.secondsRead || 0) + sessionSeconds)}</b></div>
+              <div className="row-between"><span className="muted">Chương</span><b>{chapterIndex + 1}/{chapters.length}</b></div>
+            </div>
+          </div>
+        </aside>
       </div>
-
     </div>
   );
+}
+
+/** Sinh phần "AI giải thích" bám theo nội dung chương đang mở. */
+function buildInsight(book, chapter, language) {
+  if (language === 'en') {
+    return `This chapter of "${book.title}" centers on ${(book.tags || []).slice(0, 2).join(' and ')}. `
+      + `Pay attention to how the author uses concrete scenes to carry an abstract idea — a hallmark of ${book.author}'s style.`;
+  }
+  const tags = (book.tags || []).slice(0, 3).join(', ');
+  const title = chapter.title.split(':').slice(1).join(':').trim() || chapter.title;
+  return `Chương "${title}" xoay quanh các chủ đề ${tags}. `
+    + `${book.author} dùng những hình ảnh rất cụ thể để chuyển tải một ý niệm trừu tượng — hãy để ý cách tác giả đặt nhân vật vào tình huống buộc phải lựa chọn, `
+    + `vì đó thường là nơi thông điệp chính của cuốn "${book.title}" lộ ra rõ nhất.`;
 }

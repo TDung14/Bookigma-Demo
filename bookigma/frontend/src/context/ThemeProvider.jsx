@@ -1,20 +1,17 @@
-import { useState, useEffect } from 'react';
-import { ThemeContext } from './ThemeContext';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { ThemeContext } from './contexts';
+import { load, save } from '../lib/storage';
 
-export const ThemeProvider = ({ children }) => {
-  const [isDark, setIsDark] = useState(false);
-
-  const toggleTheme = () => {
-    setIsDark(!isDark);
-  };
+export function ThemeProvider({ children }) {
+  const [isDark, setIsDark] = useState(() => load('theme', 'light') === 'dark');
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
+    save('theme', isDark ? 'dark' : 'light');
   }, [isDark]);
 
-  return (
-    <ThemeContext.Provider value={{ isDark, toggleTheme }}>
-      {children}
-    </ThemeContext.Provider>
-  );
-};
+  const toggleTheme = useCallback(() => setIsDark((v) => !v), []);
+  const value = useMemo(() => ({ isDark, toggleTheme }), [isDark, toggleTheme]);
+
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
+}
